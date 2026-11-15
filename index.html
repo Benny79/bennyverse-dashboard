@@ -41,6 +41,10 @@
   .patch { background:var(--panel); border:1px solid var(--line); border-radius:6px; margin-bottom:8px; padding:6px 10px; }
   .patch summary { color:var(--text); } .patch ul { margin:4px 0 8px; padding-left:20px; }
   .patch h4 { margin:10px 0 2px; font-size:13px; }
+  #settingsPanel { padding:12px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
+  #settingsPanel[hidden] { display:none; }
+  #settingsPanel label { margin-right:8px; } #settingsPanel select { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:5px; padding:4px 8px; }
+  #settingsPanel .row { margin:6px 0; } .warn { color:var(--amber); }
   #status { margin-left:auto; font-size:12px; }
 </style>
 </head>
@@ -51,8 +55,10 @@
   <button id="saveToken">Save token</button>
   <button id="forgetToken">Forget token</button>
   <button id="refresh">Refresh</button>
+  <button id="settingsBtn">⚙ Settings</button>
   <span id="status" class="dim"></span>
 </header>
+<section id="settingsPanel" hidden></section>
 <main id="main"><p class="dim">Paste your GitHub token above to load the board.</p></main>
 
 <script>
@@ -70,6 +76,13 @@ function getToken() { try { return localStorage.getItem(TOKEN_KEY) || memToken; 
 function setToken(t) { memToken = t; try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
 
 // ---------- GitHub API ----------
+let callCount = 0;
+const rate = { limit: 5000, remaining: null, reset: null };
+function track(res) {
+  callCount++;
+  const l = res.headers.get("X-RateLimit-Limit"), r = res.headers.get("X-RateLimit-Remaining"), t = res.headers.get("X-RateLimit-Reset");
+  if (l) rate.limit = Number(l); if (r != null && r !== "") rate.remaining = Number(r); if (t) rate.reset = Number(t) * 1000;
+}
 async function gh(path, opts = {}) {
   const res = await fetch(path.startsWith("http") ? path : API + path, {
     method: opts.method || "GET", cache: "no-store",
@@ -80,6 +93,7 @@ async function gh(path, opts = {}) {
     }, opts.body ? { "Content-Type": "application/json" } : {}),
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
+  track(res);
   if (!res.ok) {
     let msg = res.status + " " + res.statusText;
     try { const j = await res.json(); if (j.message) msg += ": " + j.message; } catch (e) {}
@@ -96,6 +110,7 @@ async function ghAll(path) { // follow pagination
   while (url) {
     const res = await fetch(url.startsWith("http") ? url : API + url, { cache: "no-store", headers: {
       "Authorization": "Bearer " + getToken(), "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } });
+    track(res);
     if (!res.ok) {
       let m = res.status + " " + res.statusText; try { m += ": " + (await res.json()).message; } catch (e) {}
       if (res.status === 401) m += " (token wrong, expired or revoked)";
@@ -156,8 +171,10 @@ function setStatus(t, bad) { $status.textContent = t; $status.className = bad ? 
 
 // ---------- data loading ----------
 let data = null;
+let callsPerRefresh = 12; // refined after each load
 async function load() {
   setStatus("Loading…");
+  const callsBefore = callCount;
   const since = new Date(Date.now() - 7 * 864e5).toISOString();
   const verFiles = { game: "package.json", launcher: "launcher/package.json", editor: "launcher/editor/version.json" };
   const [openRaw, closedRaw, commits, runs, releases, ...vers] = await Promise.all([
@@ -191,7 +208,9 @@ async function load() {
   }
   data = { open, closed, commits, run, jobs, blockInfo, releases: releases.filter(r => !r.draft), versions: Object.fromEntries(Object.keys(verFiles).map((k, idx) => [k, vers[idx]])) };
   lastLoad = Date.now();
-  setStatus("Updated " + new Date().toLocaleTimeString() + " · auto-refresh every 60 s");
+  callsPerRefresh = Math.max(1, callCount - callsBefore);
+  setStatus("Updated " + new Date().toLocaleTimeString() + " · " + autoLabel());
+  renderSettings();
 }
 
 // ---------- rendering ----------
@@ -217,7 +236,31 @@ function renderReleases() {
   return el("div", { class: "cards" }, cards);
 }
 let busy = false, lastLoad = 0;
-const REFRESH_MS = 60000;
+const REFRESH_KEY = "bennyverse-dashboard-refresh-sec";
+const REFRESH_CHOICES = [15, 30, 60, 120, 300, 600, 0]; // 0 = off
+function loadRefreshSec() { try { const v = Number(localStorage.getItem(REFRESH_KEY)); if (REFRESH_CHOICES.includes(v) && localStorage.getItem(REFRESH_KEY) !== null) return v; } catch (e) {} return 60; }
+let refreshSec = loadRefreshSec();
+function secLabel(n) { return n === 0 ? "Off" : n < 60 ? n + " seconds" : (n / 60) + (n === 60 ? " minute" : " minutes"); }
+function autoLabel() { return refreshSec ? "auto-refresh every " + secLabel(refreshSec).replace(" seconds", " s").replace(" minutes", " min").replace(" minute", " min") : "auto-refresh off"; }
+function renderSettings() {
+  const box = document.getElementById("settingsPanel"); if (box.hidden) return;
+  const perHour = refreshSec ? Math.round(callsPerRefresh * 3600 / refreshSec) : 0;
+  const pct = Math.round(perHour / rate.limit * 100);
+  const cls = perHour > rate.limit ? "err" : perHour > rate.limit * 0.8 ? "warn" : "ok";
+  const sel = el("select", { id: "refreshSel", onchange: e => {
+    refreshSec = Number(e.target.value); try { localStorage.setItem(REFRESH_KEY, String(refreshSec)); } catch (x) {}
+    applyInterval(); setStatus(autoLabel()); renderSettings(); } },
+    REFRESH_CHOICES.map(n => { const o = el("option", { value: String(n) }, secLabel(n)); if (n === refreshSec) o.selected = true; return o; }));
+  box.replaceChildren(
+    el("div", { class: "row" }, el("label", { for: "refreshSel" }, "Auto-refresh every"), sel),
+    el("div", { class: "row " + cls }, "Estimated API calls per hour: ~" + perHour.toLocaleString() + " / " + rate.limit.toLocaleString() + " (" + pct + "%)"),
+    el("div", { class: "dim row" }, "Based on " + callsPerRefresh + " calls per refresh, with the tab open all hour. Clicking buttons and opening patch notes add a few more."),
+    el("div", { class: "dim row" }, rate.remaining == null ? "GitHub's own count appears after the first load."
+      : "GitHub reports " + rate.remaining.toLocaleString() + " of " + rate.limit.toLocaleString() + " left this hour" + (rate.reset ? " (resets " + new Date(rate.reset).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + ")" : "") + "."));
+}
+let timer = null;
+function tick() { if (!document.hidden && !busy && getToken()) refreshAll(); }
+function applyInterval() { clearInterval(timer); timer = refreshSec ? setInterval(tick, refreshSec * 1000) : null; }
 function labelButton(issue, cls, label, onText, offText, titleOn, titleOff, toggle) {
   const active = labelNames(issue).includes(label);
   const b = el("button", { class: cls + (active ? " active" : ""), title: active ? titleOn : titleOff }, active ? onText : offText);
@@ -395,10 +438,13 @@ document.getElementById("forgetToken").onclick = () => {
 document.getElementById("refresh").onclick = refreshAll;
 if (getToken()) refreshAll();
 // auto refresh: skip while the tab is hidden or a button click is in flight
-setInterval(() => { if (!document.hidden && !busy && getToken()) refreshAll(); }, REFRESH_MS);
+applyInterval();
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && !busy && getToken() && Date.now() - lastLoad > REFRESH_MS) refreshAll();
+  if (!document.hidden && !busy && getToken() && refreshSec && Date.now() - lastLoad > refreshSec * 1000) refreshAll();
 });
+document.getElementById("settingsBtn").onclick = () => {
+  const box = document.getElementById("settingsPanel"); box.hidden = !box.hidden; renderSettings();
+};
 </script>
 </body>
 </html>
