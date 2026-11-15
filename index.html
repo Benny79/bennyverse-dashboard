@@ -190,7 +190,8 @@ async function load() {
     if (list.length) blockInfo.set(i.number, list);
   }
   data = { open, closed, commits, run, jobs, blockInfo, releases: releases.filter(r => !r.draft), versions: Object.fromEntries(Object.keys(verFiles).map((k, idx) => [k, vers[idx]])) };
-  setStatus("Updated " + new Date().toLocaleTimeString());
+  lastLoad = Date.now();
+  setStatus("Updated " + new Date().toLocaleTimeString() + " · auto-refresh every 60 s");
 }
 
 // ---------- rendering ----------
@@ -215,16 +216,19 @@ function renderReleases() {
   });
   return el("div", { class: "cards" }, cards);
 }
+let busy = false, lastLoad = 0;
+const REFRESH_MS = 60000;
 function labelButton(issue, cls, label, onText, offText, titleOn, titleOff, toggle) {
   const active = labelNames(issue).includes(label);
   const b = el("button", { class: cls + (active ? " active" : ""), title: active ? titleOn : titleOff }, active ? onText : offText);
   b.addEventListener("click", async () => {
-    b.disabled = true;
+    b.disabled = true; busy = true;
     setStatus("Updating #" + issue.number + "…");
     try {
       await toggle(issue, active); await refreshAll();
       setStatus("#" + issue.number + ": " + label + (active ? " removed" : " added") + " (" + new Date().toLocaleTimeString() + ")");
     } catch (e) { setStatus("Couldn't update #" + issue.number + ": " + e.message, true); b.disabled = false; }
+    finally { busy = false; }
   });
   return b;
 }
@@ -245,6 +249,7 @@ function issueRow(issue, withButton) {
       blockers.map(b => el("span", null, link(b.url, "#" + b.num), " " + b.title + " ", badge(b.state, b.state === "closed" ? "good" : b.state === "open" ? "bad" : "warn"), " "))) : null);
 }
 function render() {
+  const y = window.scrollY;
   const main = document.getElementById("main"); main.replaceChildren();
   const live = data.open.filter(i => !labelNames(i).includes(PARKED));
   const parked = data.open.filter(i => labelNames(i).includes(PARKED));
@@ -259,6 +264,8 @@ function render() {
   if (!live.length) main.append(el("p", { class: "dim" }, "No open issues."));
 
   const det = el("details", null, el("summary", null, `Parked (${parked.length})`), el("div", null, parked.map(i => issueRow(i, false))));
+  det.open = parkedOpen;
+  det.addEventListener("toggle", () => { parkedOpen = det.open; });
   main.append(el("h2", null, "On hold"), det);
 
   const blocked = data.open.filter(i => data.blockInfo.has(i.number));
@@ -272,10 +279,13 @@ function render() {
       data.closed.length ? el("ul", { class: "plain" }, data.closed.map(i =>
         el("li", null, el("span", { class: "dim" }, ago(i.closed_at) + " · "), link(i.html_url, "#" + i.number + " " + i.title)))) : el("p", { class: "dim" }, "Nothing closed."))));
   main.append(el("h2", null, "Patch notes"), renderPatchNotes());
+  window.scrollTo(0, y);
 }
 
 // ---------- patch notes ----------
 let patchKind = "game";
+const patchOpen = new Map(); // tag -> open?
+let parkedOpen = false;
 const patchCache = new Map(); // tag -> { bugs, features, other }
 const KINDS = { game: /^v\d/, launcher: /^launcher-v/, editor: /^editor-v/ };
 const BUG_RE = /\b(fix(es|ed|ing)?|bugs?|crash(es|ed)?|broken|regression|glitch|stuck)\b/i;
@@ -337,8 +347,9 @@ function renderPatchNotes() {
       el("summary", null, el("strong", null, rel.tag_name), " · " + new Date(rel.published_at || rel.created_at).toLocaleDateString()), box);
     let loaded = false;
     const go = () => { if (!loaded) { loaded = true; renderPatchBody(box, rel, prev); } };
-    d.addEventListener("toggle", () => { if (d.open) go(); });
-    if (idx === 0) { d.open = true; go(); }
+    const startOpen = patchOpen.has(rel.tag_name) ? patchOpen.get(rel.tag_name) : idx === 0;
+    if (startOpen) { d.open = true; go(); }
+    d.addEventListener("toggle", () => { patchOpen.set(rel.tag_name, d.open); if (d.open) go(); });
     wrap.append(d);
   });
   return wrap;
@@ -383,6 +394,11 @@ document.getElementById("forgetToken").onclick = () => {
 };
 document.getElementById("refresh").onclick = refreshAll;
 if (getToken()) refreshAll();
+// auto refresh: skip while the tab is hidden or a button click is in flight
+setInterval(() => { if (!document.hidden && !busy && getToken()) refreshAll(); }, REFRESH_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && !busy && getToken() && Date.now() - lastLoad > REFRESH_MS) refreshAll();
+});
 </script>
 </body>
 </html>
