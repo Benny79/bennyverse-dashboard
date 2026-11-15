@@ -27,7 +27,10 @@
   .issue:first-of-type { border-top-left-radius:6px; border-top-right-radius:6px; } .issue:last-child { border-bottom:0; border-bottom-left-radius:6px; border-bottom-right-radius:6px; }
   .issue.next { border-left:3px solid var(--amber); }
   .issue .meta { grid-column:1; font-size:12px; color:var(--dim); }
-  .issue .act { grid-row:1 / span 2; grid-column:2; align-self:center; }
+  .issue .act { grid-row:1 / span 2; grid-column:2; align-self:center; display:flex; gap:6px; }
+  .hot { color:var(--red); font-weight:700; margin-right:6px; letter-spacing:1px; }
+  button.high.active { background:var(--red); color:#fff; border-color:var(--red); font-weight:600; }
+  button.park.active { background:var(--dim); color:#111; border-color:var(--dim); font-weight:600; }
   .issue .blockers { grid-column:1 / span 2; font-size:12px; }
   button.addr.active { background:var(--amber); color:#111; border-color:var(--amber); font-weight:600; }
   details { margin-top:6px; } summary { cursor:pointer; color:var(--dim); }
@@ -58,7 +61,7 @@ const REPO = "Benny79/bennyverse";
 const BRANCH = "main";
 const API = "https://api.github.com";
 const ROLES = ["story", "art", "audio", "gameplay", "building", "ui", "tools", "director"];
-const PARKED = "parked", DO_NEXT = "do-next";
+const PARKED = "parked", DO_NEXT = "do-next", HIGH = "high-priority";
 const TOKEN_KEY = "bennyverse-dashboard-token";
 
 // ---------- token storage (browser only; never in code) ----------
@@ -125,7 +128,8 @@ function groupByRole(issues) {
     for (const r of (roles.length ? roles : ["no role"])) groups[r].push(i);
   }
   for (const k in groups) groups[k].sort((a, b) =>
-    (labelNames(b).includes(DO_NEXT) - labelNames(a).includes(DO_NEXT)) || (new Date(b.updated_at) - new Date(a.updated_at)));
+    (labelNames(b).includes(DO_NEXT) - labelNames(a).includes(DO_NEXT)) ||
+    (labelNames(b).includes(HIGH) - labelNames(a).includes(HIGH)) || (new Date(b.updated_at) - new Date(a.updated_at)));
   return groups;
 }
 function ago(iso) {
@@ -211,24 +215,28 @@ function renderReleases() {
   });
   return el("div", { class: "cards" }, cards);
 }
-function addressButton(issue) {
-  const active = labelNames(issue).includes(DO_NEXT);
-  const b = el("button", { class: "addr" + (active ? " active" : ""), title: active ? "Click to remove do-next" : "Label do-next and comment" }, active ? "✓ Address this" : "Address this");
+function labelButton(issue, cls, label, onText, offText, titleOn, titleOff, toggle) {
+  const active = labelNames(issue).includes(label);
+  const b = el("button", { class: cls + (active ? " active" : ""), title: active ? titleOn : titleOff }, active ? onText : offText);
   b.addEventListener("click", async () => {
     b.disabled = true;
-    try { await toggleDoNext(issue, active); await refreshAll(); }
+    try { await toggle(issue, active); await refreshAll(); }
     catch (e) { setStatus("Couldn't update #" + issue.number + ": " + e.message, true); b.disabled = false; }
   });
   return b;
 }
+const addressButton = i => labelButton(i, "addr", DO_NEXT, "\u2713 Address this", "Address this", "Click to remove do-next", "Label do-next and comment", toggleDoNext);
+const highButton = i => labelButton(i, "high", HIGH, "\u2713 High priority", "High priority", "Click to remove high priority", "Mark high priority", toggleHigh);
+const parkButton = i => labelButton(i, "park", PARKED, "Unpark", "Park this", "Click to take this off hold", "Put this issue on hold", togglePark);
 function issueRow(issue, withButton) {
   const names = labelNames(issue);
   const blockers = data.blockInfo.get(issue.number);
   const unresolved = blockers && blockers.some(b => b.state !== "closed");
   return el("div", { class: "issue" + (names.includes(DO_NEXT) ? " next" : "") },
-    el("div", null, link(issue.html_url, "#" + issue.number), " ", issue.title),
+    el("div", null, names.includes(HIGH) ? el("span", { class: "hot", title: "High priority" }, "!!!") : null, link(issue.html_url, "#" + issue.number), " ", issue.title),
     el("div", { class: "meta" }, names.map(n => badge(n, n === DO_NEXT ? "warn" : "")), "updated " + ago(issue.updated_at)),
-    withButton ? el("div", { class: "act" }, addressButton(issue)) : null,
+    withButton ? el("div", { class: "act" }, addressButton(issue), highButton(issue), parkButton(issue))
+      : (names.includes(PARKED) ? el("div", { class: "act" }, parkButton(issue)) : null),
     blockers ? el("div", { class: "blockers" },
       unresolved ? badge("blocked", "bad") : badge("blockers cleared", "good"),
       blockers.map(b => el("span", null, link(b.url, "#" + b.num), " " + b.title + " ", badge(b.state, b.state === "closed" ? "good" : b.state === "open" ? "bad" : "warn"), " "))) : null);
@@ -334,6 +342,17 @@ function renderPatchNotes() {
 }
 
 // ---------- "Address this" ----------
+async function ensureLabel(name, color, description) {
+  try { await gh(`/repos/${REPO}/labels`, { method: "POST", body: { name, color, description } }); }
+  catch (e) { if (e.status !== 422) throw e; } // 422 = label already exists
+}
+async function setLabel(issue, name, active, color, description) {
+  if (active) { await gh(`/repos/${REPO}/issues/${issue.number}/labels/${encodeURIComponent(name)}`, { method: "DELETE" }); return; }
+  await ensureLabel(name, color, description);
+  await gh(`/repos/${REPO}/issues/${issue.number}/labels`, { method: "POST", body: { labels: [name] } });
+}
+const toggleHigh = (issue, active) => setLabel(issue, HIGH, active, "e5534b", "High priority");
+const togglePark = (issue, active) => setLabel(issue, PARKED, active, "8b95a3", "On hold");
 async function toggleDoNext(issue, active) {
   if (active) { // second click removes the label (the earlier comment stays)
     await gh(`/repos/${REPO}/issues/${issue.number}/labels/${DO_NEXT}`, { method: "DELETE" });
