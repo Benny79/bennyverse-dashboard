@@ -161,7 +161,7 @@ function el(tag, attrs, ...kids) {
     if (k === "class") e.className = attrs[k]; else if (k.startsWith("on")) e.addEventListener(k.slice(2), attrs[k]);
     else if (attrs[k] !== false && attrs[k] != null) e.setAttribute(k, attrs[k]);
   }
-  for (const kid of kids.flat()) if (kid != null) e.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  for (const kid of kids.flat(Infinity)) if (kid != null) e.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
   return e;
 }
 function link(href, text) { return el("a", { href, target: "_blank", rel: "noopener" }, text); }
@@ -363,15 +363,32 @@ function patchSection(title, items) {
   return [el("h4", null, `${title} (${items.length})`), el("ul", null, items.map(x =>
     el("li", null, link(x.url, x.text), x.kind === "issue" ? el("span", { class: "dim" }, " · issue closed") : null)))];
 }
+function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+function patchSummary(d) {
+  const parts = [];
+  if (d.features.length) parts.push(plural(d.features.length, "feature added", "features added"));
+  if (d.bugs.length) parts.push(plural(d.bugs.length, "bug fixed", "bugs fixed"));
+  if (d.other.length) parts.push(plural(d.other.length, "other change", "other changes"));
+  if (!parts.length) return null;
+  const top = d.features.concat(d.bugs).slice(0, 3); // highlights: features first, then fixes
+  return el("div", null,
+    el("p", null, el("strong", null, "Summary: "), parts.join(", ") + "."),
+    top.length ? el("p", { class: "dim" }, "Highlights: ", top.map((x, i) => [i ? " \u00b7 " : "", link(x.url, x.text)])) : null);
+}
 function renderPatchBody(box, rel, prev) {
   const done = d => {
-    box.replaceChildren(d.note ? el("p", { class: "dim" }, d.note) : null,
+    const none = !(d.bugs.length + d.features.length + d.other.length);
+    const kids = [
+      d.note ? el("p", { class: "dim" }, d.note) : null,
+      patchSummary(d),
       patchSection("Bugs fixed", d.bugs), patchSection("Features added", d.features), patchSection("Other changes", d.other),
-      !(d.bugs.length + d.features.length + d.other.length) ? el("p", { class: "dim" }, "No commits or closed issues found in this window.") : null,
-      el("p", null, link(rel.html_url, "Open the GitHub release")));
+      none ? el("p", { class: "dim" }, "No commits or closed issues found in this window.") : null,
+      el("p", null, link(rel.html_url, "Open the GitHub release")),
+    ].flat().filter(Boolean); // replaceChildren needs real nodes: no nulls, no nested arrays
+    box.replaceChildren(...kids);
   };
   if (patchCache.has(rel.tag_name)) return done(patchCache.get(rel.tag_name));
-  box.replaceChildren(el("p", { class: "dim" }, "Loading…"));
+  box.replaceChildren(el("p", { class: "dim" }, "Loading\u2026"));
   fetchPatch(rel, prev).then(d => { patchCache.set(rel.tag_name, d); done(d); })
     .catch(e => box.replaceChildren(el("p", { class: "err" }, "Couldn't load patch notes: " + e.message)));
 }
